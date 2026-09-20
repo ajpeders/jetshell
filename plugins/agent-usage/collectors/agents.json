@@ -1,0 +1,7 @@
+{
+  "agents": [
+    { "providerId": "deepseek", "id": "deepseek", "name": "DeepSeek", "tierLabel": "Prepaid" },
+    { "providerId": "ollama", "id": "ollama", "name": "Ollama", "tierLabel": "Local" },
+    { "providerId": "minimax-coding-plan", "id": "minimax", "name": "MiniMax", "tierLabel": "Coding Plan" }
+  ]
+}

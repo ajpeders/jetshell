@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -euo pipefail
+
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source_dir="$root_dir/plugins/agent-usage"
+target_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/agent-usage"
+
+mkdir -p "$target_dir"
+
+if command -v rsync >/dev/null 2>&1; then
+  rsync --archive --delete "$source_dir/" "$target_dir/"
+else
+  cp -a "$source_dir/." "$target_dir/"
+fi
+
+omarchy-shell shell rescanPlugins >/dev/null
+printf 'Installed agent-usage to %s\n' "$target_dir"

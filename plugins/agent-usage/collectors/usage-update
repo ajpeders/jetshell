@@ -1,0 +1,13 @@
+#!/bin/bash
+# jetshell usage-update: refresh the stock agents (claude/codex/fireworks) via
+# Omarchy's packaged collectors, then refresh jetshell's own agents
+# (deepseek/ollama/minimax) from the local opencode database.
+#
+# Accepts the same flags as omarchy-agent-usage-update: --force, --limits-only,
+# --except <id>, and positional agent ids. The stock collectors ignore ids they
+# don't know; collect.py applies the same flags to its own agents.
+set -uo pipefail
+
+omarchy-agent-usage-update "$@" || true
+
+exec "$(dirname "$0")/collect.py" "$@"

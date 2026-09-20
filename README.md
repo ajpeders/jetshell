@@ -11,8 +11,11 @@ persisted across reboots.
 
 ```
 jetshell/
-├── switcher/   # jetshell-switch — pick the active shell, persist the choice
-└── shell/      # the shell itself: a hand-written Quickshell config
+├── plugins/
+│   └── agent-usage/  # AI usage, balances, limits, and model breakdowns
+├── scripts/          # install/development helpers
+├── switcher/         # jetshell-switch — pick the active shell, persist it
+└── shell/            # the shell itself: a hand-written Quickshell config
 ```
 
 ### switcher/
@@ -30,12 +33,24 @@ interactive menu:
 The jetshell shell proper. Hand-written Quickshell (bar, notifications, panels,
 launcher). Work in progress — nothing here yet.
 
-## Companion
+### plugins/agent-usage/
 
-- **[agent-usage](https://git.thelunadog.com/alex/agent-usage)** — a Quickshell
-  bar-widget that tracks AI coding-usage (Claude, Codex, Fireworks, DeepSeek,
-  Ollama, MiniMax) in one panel. Kept as a separate repo; it installs as a
-  normal shell plugin under `~/.config/omarchy/plugins/`.
+A Quickshell bar widget that tracks Claude, Codex, Fireworks, DeepSeek, Ollama,
+and MiniMax in one panel. It combines local opencode session statistics with
+provider account details where an API exists (currently DeepSeek prepaid
+balance), and retains Omarchy's subscription limits for Claude and Codex.
+
+Install or refresh the working copy under Omarchy's plugin directory:
+
+```bash
+./scripts/install-agent-usage
+```
+
+Then add it to the bar if it is not already present:
+
+```bash
+omarchy plugin enable agent-usage
+```
 
 ## Status
 
