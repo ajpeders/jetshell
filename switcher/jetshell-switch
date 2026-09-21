@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+readonly PROGRAM=${0##*/}
+readonly PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+readonly STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
+readonly STATE_DIR=${JETSHELL_STATE_DIR:-"$STATE_HOME/jetshell"}
+readonly STATE_FILE="$STATE_DIR/active"
+# OMARCHY_PATH for the jetshell backend: the Omarchy tree with shell/ swapped
+# for this repo's shell/, so omarchy-* helpers talk to the fork over IPC.
+readonly OVERLAY_ROOT="$STATE_DIR/omarchy-root"
+readonly JETSHELL_SHELL=${JETSHELL_SHELL_DIR:-"$PROJECT_ROOT/shell"}
+readonly PROC_ROOT=${JETSHELL_PROC_ROOT:-/proc}
+readonly NOCTALIA_SERVICE=${JETSHELL_NOCTALIA_SERVICE:-noctalia-shell.service}
+readonly START_TIMEOUT=${JETSHELL_START_TIMEOUT:-15}
+readonly STOP_TIMEOUT=${JETSHELL_STOP_TIMEOUT:-10}
+readonly KILL=${JETSHELL_KILL:-kill}
+readonly BACKENDS=(jetshell omarchy noctalia)
+
+usage() {
+    cat <<EOF
+Usage: $PROGRAM <command>
+
+Switch the desktop shell between jetshell, stock Omarchy, and Noctalia, for
+testing the jetshell fork.
+
+Commands:
+  list              List backends and their availability
+  status            Show the saved selection and running backends
+  doctor            Diagnose backend requirements
+  switch <backend>  Stop the running shell and start <backend>
+  help              Show this help
+
+Backends: ${BACKENDS[*]}
+EOF
+}
+
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# The real Omarchy tree (OMARCHY_PATH of a stock install). OMARCHY_PATH itself
+# is skipped when it is our overlay, as it is inside a jetshell session.
+omarchy_root() {
+    local candidate
+    local -a candidates=()
+
+    [[ -n ${JETSHELL_OMARCHY_ROOT:-} ]] && candidates+=("$JETSHELL_OMARCHY_ROOT")
+    [[ -n ${OMARCHY_PATH:-} && $OMARCHY_PATH != "$OVERLAY_ROOT" ]] &&
+        candidates+=("$OMARCHY_PATH")
+    candidates+=(
+        /usr/share/omarchy
+        "$HOME/.local/share/omarchy-shell/usr/share/omarchy"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -x $candidate/bin/omarchy-launch-shell && -f $candidate/shell/shell.qml ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Prints the PIDs of processes started with `-p <expected>`, as
+# omarchy-launch-shell runs `quickshell -n -p "$OMARCHY_PATH/shell"`.
+quickshell_path_pids() {
+    local expected=$1
+    local cmdline argument previous
+    local -a arguments
+
+    for cmdline in "$PROC_ROOT"/[0-9]*/cmdline; do
+        [[ -r $cmdline ]] || continue
+        arguments=()
+        mapfile -d '' -t arguments < "$cmdline" 2>/dev/null || true
+        previous=
+        for argument in "${arguments[@]}"; do
+            if [[ $previous == -p && $argument == "$expected" ]]; then
+                cmdline=${cmdline%/cmdline}
+                printf '%s\n' "${cmdline##*/}"
+                break
+            fi
+            previous=$argument
+        done
+    done
+}
+
+quickshell_path_running() {
+    [[ -n $(quickshell_path_pids "$1") ]]
+}
+
+# Prints the reason a backend cannot start; succeeds (prints nothing) if it can.
+backend_problem() {
+    case $1 in
+        noctalia)
+            if ! has_command noctalia; then
+                echo 'noctalia command not found'
+            elif [[ $(systemctl --user show --property=LoadState --value "$NOCTALIA_SERVICE" 2>/dev/null) != loaded ]]; then
+                echo "$NOCTALIA_SERVICE is not loadable"
+            else
+                return 0
+            fi
+            ;;
+        omarchy)
+            if ! has_command quickshell; then
+                echo 'quickshell command not found'
+            elif ! omarchy_root >/dev/null; then
+                echo 'Omarchy tree not found (see HOWTO.md)'
+            else
+                return 0
+            fi
+            ;;
+        jetshell)
+            if [[ ! -f $JETSHELL_SHELL/shell.qml ]]; then
+                echo "no shell.qml in $JETSHELL_SHELL"
+            elif ! has_command quickshell; then
+                echo 'quickshell command not found'
+            elif ! omarchy_root >/dev/null; then
+                echo 'Omarchy tree not found (needed for omarchy-* helpers)'
+            else
+                return 0
+            fi
+            ;;
+    esac
+    return 1
+}
+
+backend_detail() {
+    local root
+    case $1 in
+        noctalia) echo "$NOCTALIA_SERVICE" ;;
+        omarchy)
+            if root=$(omarchy_root); then echo "$root/shell"; else echo -; fi
+            ;;
+        jetshell) echo "$JETSHELL_SHELL" ;;
+    esac
+}
+
+backend_running() {
+    local root
+    case $1 in
+        noctalia) systemctl --user is-active --quiet "$NOCTALIA_SERVICE" 2>/dev/null ;;
+        omarchy)
+            root=$(omarchy_root) && quickshell_path_running "$root/shell"
+            ;;
+        jetshell)
+            quickshell_path_running "$OVERLAY_ROOT/shell" ||
+                quickshell_path_running "$JETSHELL_SHELL"
+            ;;
+    esac
+}
+
+# OMARCHY_PATH a Quickshell-based backend runs with.
+backend_omarchy_path() {
+    case $1 in
+        jetshell) echo "$OVERLAY_ROOT" ;;
+        omarchy) omarchy_root ;;
+        *) return 1 ;;
+    esac
+}
+
+# Paths a running instance of the backend may have been started with.
+backend_shell_paths() {
+    local root
+    case $1 in
+        jetshell) printf '%s\n' "$OVERLAY_ROOT/shell" "$JETSHELL_SHELL" ;;
+        omarchy) root=$(omarchy_root) && printf '%s\n' "$root/shell" ;;
+    esac
+}
+
+# Runs an omarchy-* IPC call against the shell at OMARCHY_PATH=$1.
+omarchy_ipc() {
+    local path=$1
+    shift
+    OMARCHY_PATH=$path PATH="$path/bin:$PATH" "$path/bin/omarchy-shell" "$@" 2>/dev/null
+}
+
+backend_ready() {
+    local path
+    case $1 in
+        noctalia) backend_running noctalia ;;
+        *) path=$(backend_omarchy_path "$1") && [[ $(omarchy_ipc "$path" shell ping) == ok ]] ;;
+    esac
+}
+
+backend_locked() {
+    local path
+    case $1 in
+        noctalia) return 1 ;;
+        *) path=$(backend_omarchy_path "$1") && [[ $(omarchy_ipc "$path" lock isLocked) == true ]] ;;
+    esac
+}
+
+# Rebuilds the jetshell OMARCHY_PATH: every entry of the real Omarchy tree
+# linked as-is, except shell/, which points at this repo's shell.
+build_overlay() {
+    local root entry name staging=$OVERLAY_ROOT.new
+
+    root=$(omarchy_root) || return 1
+    rm -rf "$staging"
+    mkdir -p "$staging" || return 1
+    for entry in "$root"/* "$root"/.[!.]*; do
+        [[ -e $entry || -L $entry ]] || continue
+        name=${entry##*/}
+        [[ $name == shell ]] && continue
+        ln -s "$entry" "$staging/$name" || return 1
+    done
+    ln -s "$JETSHELL_SHELL" "$staging/shell" || return 1
+    rm -rf "$OVERLAY_ROOT"
+    mv "$staging" "$OVERLAY_ROOT"
+}
+
+start_backend() {
+    local path
+    case $1 in
+        noctalia) systemctl --user start "$NOCTALIA_SERVICE" ;;
+        *)
+            path=$(backend_omarchy_path "$1") || return 1
+            setsid -f env OMARCHY_PATH="$path" PATH="$path/bin:$PATH" \
+                "$path/bin/omarchy-launch-shell" </dev/null >/dev/null 2>&1
+            ;;
+    esac
+}
+
+parent_pid() {
+    local key value
+    while read -r key value; do
+        [[ $key == PPid: ]] && { printf '%s\n' "$value"; return 0; }
+    done < "$PROC_ROOT/$1/status"
+    return 1
+}
+
+# Stops Quickshell-based backends by PID, never by process name. The
+# omarchy-launch-shell supervisor would relaunch a killed shell, so it is the
+# one signalled when it is the parent; its trap then stops the shell cleanly.
+stop_backend() {
+    local path pid parent
+    local -a arguments
+    case $1 in
+        noctalia) systemctl --user stop "$NOCTALIA_SERVICE" ;;
+        *)
+            while IFS= read -r path; do
+                for pid in $(quickshell_path_pids "$path"); do
+                    if parent=$(parent_pid "$pid" 2>/dev/null); then
+                        arguments=()
+                        mapfile -d '' -t arguments < "$PROC_ROOT/$parent/cmdline" 2>/dev/null || true
+                        if [[ " ${arguments[*]} " == *"/omarchy-launch-shell "* ]]; then
+                            pid=$parent
+                        fi
+                    fi
+                    "$KILL" -TERM "$pid"
+                done
+            done < <(backend_shell_paths "$1")
+            ;;
+    esac
+}
+
+# wait_for <seconds> <command...>: polls until the command succeeds.
+wait_for() {
+    local deadline=$((SECONDS + $1))
+    shift
+    until "$@"; do
+        (( SECONDS >= deadline )) && return 1
+        sleep 0.2
+    done
+}
+
+backend_stopped() {
+    ! backend_running "$1"
+}
+
+save_selection() {
+    mkdir -p "$STATE_DIR" &&
+        printf '%s\n' "$1" > "$STATE_FILE.new" &&
+        mv "$STATE_FILE.new" "$STATE_FILE"
+}
+
+command_switch() {
+    local target=${1:-} backend problem
+    local -a previous=()
+
+    if [[ " ${BACKENDS[*]} " != *" $target "* ]]; then
+        printf '%s: unknown backend: %s (want: %s)\n' "$PROGRAM" "$target" "${BACKENDS[*]}" >&2
+        return 2
+    fi
+    if ! problem=$(backend_problem "$target"); then
+        printf '%s: %s is unavailable: %s\n' "$PROGRAM" "$target" "$problem" >&2
+        return 1
+    fi
+
+    for backend in "${BACKENDS[@]}"; do
+        backend_running "$backend" && previous+=("$backend")
+    done
+
+    if [[ ${previous[*]} == "$target" ]]; then
+        save_selection "$target" || return 1
+        printf '%s is already running\n' "$target"
+        return 0
+    fi
+
+    for backend in "${previous[@]}"; do
+        if backend_locked "$backend"; then
+            printf '%s: %s is locked; unlock before switching\n' "$PROGRAM" "$backend" >&2
+            return 1
+        fi
+    done
+
+    if [[ $target == jetshell ]] && ! build_overlay; then
+        printf '%s: could not build %s\n' "$PROGRAM" "$OVERLAY_ROOT" >&2
+        return 1
+    fi
+
+    for backend in "${previous[@]}"; do
+        [[ $backend == "$target" ]] && continue
+        stop_backend "$backend"
+        if ! wait_for "$STOP_TIMEOUT" backend_stopped "$backend"; then
+            printf '%s: %s did not stop\n' "$PROGRAM" "$backend" >&2
+            return 1
+        fi
+    done
+
+    if ! backend_running "$target"; then
+        start_backend "$target"
+    fi
+    if wait_for "$START_TIMEOUT" backend_ready "$target"; then
+        save_selection "$target" || return 1
+        printf 'Switched to %s\n' "$target"
+        return 0
+    fi
+
+    printf '%s: %s did not become ready; rolling back\n' "$PROGRAM" "$target" >&2
+    stop_backend "$target"
+    wait_for "$STOP_TIMEOUT" backend_stopped "$target" || true
+    for backend in "${previous[@]}"; do
+        [[ $backend == "$target" ]] && continue
+        start_backend "$backend"
+        if wait_for "$START_TIMEOUT" backend_ready "$backend"; then
+            printf 'Restored %s\n' "$backend" >&2
+        else
+            printf '%s: could not restore %s\n' "$PROGRAM" "$backend" >&2
+        fi
+    done
+    return 1
+}
+
+saved_selection() {
+    local selection
+
+    [[ -f $STATE_FILE ]] || return 1
+    IFS= read -r selection < "$STATE_FILE" || [[ -n $selection ]] || return 1
+    [[ -n $selection ]] || return 1
+    printf '%s\n' "$selection"
+}
+
+command_list() {
+    local backend availability running
+
+    printf '%-10s %-12s %-8s %s\n' BACKEND AVAILABILITY RUNNING DETAIL
+    for backend in "${BACKENDS[@]}"; do
+        availability=unavailable
+        backend_problem "$backend" >/dev/null && availability=available
+        running=stopped
+        backend_running "$backend" && running=running
+        printf '%-10s %-12s %-8s %s\n' "$backend" "$availability" "$running" "$(backend_detail "$backend")"
+    done
+}
+
+command_status() {
+    local backend selection
+    local -a running=()
+
+    if selection=$(saved_selection); then
+        printf 'Selected: %s\n' "$selection"
+    else
+        printf 'Selected: none\n'
+    fi
+    printf 'State:    %s\n' "$STATE_FILE"
+
+    for backend in "${BACKENDS[@]}"; do
+        backend_running "$backend" && running+=("$backend")
+    done
+
+    if (( ${#running[@]} == 0 )); then
+        printf 'Running:  none detected\n'
+    else
+        printf 'Running:  %s\n' "${running[*]}"
+    fi
+
+    if (( ${#running[@]} > 1 )); then
+        printf 'Warning:  multiple shell backends detected\n'
+    fi
+}
+
+command_doctor() {
+    local backend problem ready=0 selection
+
+    printf '%-12s %-10s %s\n' STATUS CHECK DETAIL
+    for backend in "${BACKENDS[@]}"; do
+        if problem=$(backend_problem "$backend"); then
+            printf '%-12s %-10s %s\n' READY "$backend" "$(backend_detail "$backend")"
+            ((ready += 1))
+        else
+            printf '%-12s %-10s %s\n' UNAVAILABLE "$backend" "$problem"
+        fi
+    done
+
+    if selection=$(saved_selection); then
+        printf '%-12s %-10s %s\n' INFO state "saved selection: $selection"
+    else
+        printf '%-12s %-10s %s\n' INFO state "no saved selection at $STATE_FILE"
+    fi
+
+    if (( ready == 0 )); then
+        printf '\nNo backend is ready.\n' >&2
+        return 1
+    fi
+}
+
+main() {
+    case ${1:-} in
+        list) command_list ;;
+        status) command_status ;;
+        doctor) command_doctor ;;
+        switch) command_switch "${2:-}" ;;
+        help|--help|-h) usage ;;
+        '')
+            usage >&2
+            return 2
+            ;;
+        *)
+            printf '%s: unknown command: %s\n' "$PROGRAM" "$1" >&2
+            usage >&2
+            return 2
+            ;;
+    esac
+}
+
+main "$@"

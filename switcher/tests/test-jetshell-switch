@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# Tests for jetshell-switch. Everything is mocked: commands on PATH, /proc, the
+# Omarchy tree, and systemd. Nothing touches the running desktop.
+
+set -u
+set -o pipefail
+
+readonly SWITCH=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/jetshell-switch
+failures=0
+
+setup() {
+    TEST_DIR=$(mktemp -d)
+    export HOME=$TEST_DIR/home
+    export XDG_STATE_HOME=$HOME/.local/state
+    export JETSHELL_PROC_ROOT=$TEST_DIR/proc
+    export JETSHELL_SHELL_DIR=$TEST_DIR/repo/shell
+    export JETSHELL_OMARCHY_ROOT=$TEST_DIR/omarchy
+    unset OMARCHY_PATH JETSHELL_STATE_DIR
+    MOCK_BIN=$TEST_DIR/bin
+    NOCTALIA_ACTIVE=$TEST_DIR/noctalia-active
+    export TEST_DIR NOCTALIA_ACTIVE
+    export JETSHELL_KILL=$TEST_DIR/bin/kill
+    export JETSHELL_START_TIMEOUT=2 JETSHELL_STOP_TIMEOUT=2
+    unset JETSHELL_TEST_FAIL_START
+    mkdir -p "$HOME" "$JETSHELL_PROC_ROOT" "$MOCK_BIN"
+    # The switcher sees only mocks plus the tools it needs, so real
+    # noctalia/quickshell/systemctl on the host cannot leak in.
+    local tool
+    for tool in bash dirname env setsid sleep ln rm mv mkdir; do
+        ln -s "$(command -v "$tool")" "$MOCK_BIN/$tool"
+    done
+    # kill: remove the fake process (and a supervisor's shell child) and log it.
+    cat > "$MOCK_BIN/kill" <<'EOF'
+#!/bin/bash
+PATH=/usr/bin:/bin
+pid=${2:?}
+echo "$pid" >> "$TEST_DIR/killed"
+rm -rf "${JETSHELL_PROC_ROOT:?}/$pid"
+for child in "$JETSHELL_PROC_ROOT"/*/status; do
+    [[ -f $child ]] && grep -q "^PPid:	$pid$" "$child" && rm -rf "${child%/status}"
+done
+exit 0
+EOF
+    chmod +x "$MOCK_BIN/kill"
+}
+
+run_switch() {
+    PATH=$MOCK_BIN "$SWITCH" "$@"
+}
+
+teardown() {
+    rm -rf "$TEST_DIR"
+}
+
+mock_quickshell() {
+    printf '#!/bin/sh\nexit 0\n' > "$MOCK_BIN/quickshell"
+    chmod +x "$MOCK_BIN/quickshell"
+}
+
+mock_noctalia() {
+    printf '#!/bin/sh\nexit 0\n' > "$MOCK_BIN/noctalia"
+    cat > "$MOCK_BIN/systemctl" <<EOF
+#!/bin/sh
+case "\$*" in
+    *show*LoadState*) echo loaded ;;
+    *is-active*) [ -f "$NOCTALIA_ACTIVE" ] ;;
+    *start*) [ -f "$TEST_DIR/fail-noctalia" ] || : > "$NOCTALIA_ACTIVE" ;;
+    *stop*) /usr/bin/rm -f "$NOCTALIA_ACTIVE" ;;
+esac
+EOF
+    chmod +x "$MOCK_BIN/noctalia" "$MOCK_BIN/systemctl"
+}
+
+# Fake Omarchy tree. The launcher registers a supervisor + quickshell pair in
+# the fake /proc (jetshell: 200/201, omarchy: 300/301); omarchy-shell answers
+# `shell ping` while that shell exists and `lock isLocked` from $TEST_DIR/locked.
+mock_omarchy_tree() {
+    local bin=$JETSHELL_OMARCHY_ROOT/bin
+    mkdir -p "$bin" "$JETSHELL_OMARCHY_ROOT/shell" "$JETSHELL_OMARCHY_ROOT/default"
+    touch "$JETSHELL_OMARCHY_ROOT/shell/shell.qml"
+    cat > "$bin/omarchy-launch-shell" <<'EOF'
+#!/bin/bash
+PATH=/usr/bin:/bin
+[[ -n ${JETSHELL_TEST_FAIL_START:-} ]] && exit 1
+base=300
+[[ $OMARCHY_PATH == */omarchy-root ]] && base=200
+mkdir -p "$JETSHELL_PROC_ROOT/$base" "$JETSHELL_PROC_ROOT/$((base + 1))"
+printf '%s\0' /bin/bash "$OMARCHY_PATH/bin/omarchy-launch-shell" > "$JETSHELL_PROC_ROOT/$base/cmdline"
+printf 'PPid:\t1\n' > "$JETSHELL_PROC_ROOT/$base/status"
+printf '%s\0' quickshell -n -p "$OMARCHY_PATH/shell" > "$JETSHELL_PROC_ROOT/$((base + 1))/cmdline"
+printf 'PPid:\t%s\n' "$base" > "$JETSHELL_PROC_ROOT/$((base + 1))/status"
+EOF
+    cat > "$bin/omarchy-shell" <<'EOF'
+#!/bin/bash
+PATH=/usr/bin:/bin
+pid=301
+[[ $OMARCHY_PATH == */omarchy-root ]] && pid=201
+[[ -d $JETSHELL_PROC_ROOT/$pid ]] || exit 1
+case "$1 $2" in
+    "shell ping") echo ok ;;
+    "lock isLocked") [[ -f $TEST_DIR/locked ]] && echo true || echo false ;;
+esac
+EOF
+    chmod +x "$bin/omarchy-launch-shell" "$bin/omarchy-shell"
+}
+
+mock_jetshell_shell() {
+    mkdir -p "$JETSHELL_SHELL_DIR"
+    touch "$JETSHELL_SHELL_DIR/shell.qml"
+}
+
+# Fake a process whose argv is the given arguments.
+mock_process() {
+    local pid=$1
+    shift
+    mkdir -p "$JETSHELL_PROC_ROOT/$pid"
+    printf '%s\0' "$@" > "$JETSHELL_PROC_ROOT/$pid/cmdline"
+}
+
+all_ready() {
+    mock_quickshell
+    mock_noctalia
+    mock_omarchy_tree
+    mock_jetshell_shell
+}
+
+check() {
+    local name=$1 pattern=$2 output=$3
+    if ! grep -Eq -- "$pattern" <<<"$output"; then
+        printf 'FAIL: %s\n  expected /%s/ in:\n%s\n' "$name" "$pattern" "$output"
+        ((failures += 1))
+    fi
+}
+
+test_nothing_installed() {
+    setup
+    mock_jetshell_shell
+    local output status
+    output=$(run_switch doctor 2>&1)
+    status=$?
+    check 'jetshell needs quickshell' 'UNAVAILABLE +jetshell +quickshell command not found' "$output"
+    check 'omarchy needs quickshell' 'UNAVAILABLE +omarchy +quickshell command not found' "$output"
+    check 'noctalia missing' 'UNAVAILABLE +noctalia +noctalia command not found' "$output"
+    check 'no backend ready' 'No backend is ready' "$output"
+    (( status == 1 )) || { echo "FAIL: doctor exit $status, want 1"; ((failures += 1)); }
+    teardown
+}
+
+test_missing_omarchy_tree() {
+    setup
+    mock_quickshell
+    mock_jetshell_shell
+    local output
+    output=$(run_switch doctor 2>&1)
+    check 'jetshell needs Omarchy helpers' 'UNAVAILABLE +jetshell +Omarchy tree not found' "$output"
+    check 'omarchy needs its tree' 'UNAVAILABLE +omarchy +Omarchy tree not found' "$output"
+    teardown
+}
+
+test_all_ready() {
+    setup
+    all_ready
+    local output status
+    output=$(run_switch doctor 2>&1)
+    status=$?
+    check 'jetshell ready' "READY +jetshell +$JETSHELL_SHELL_DIR" "$output"
+    check 'omarchy ready' "READY +omarchy +$JETSHELL_OMARCHY_ROOT/shell" "$output"
+    check 'noctalia ready' 'READY +noctalia +noctalia-shell.service' "$output"
+    (( status == 0 )) || { echo "FAIL: doctor exit $status, want 0"; ((failures += 1)); }
+
+    output=$(run_switch list)
+    check 'list jetshell' '^jetshell +available +stopped' "$output"
+    check 'list omarchy' '^omarchy +available +stopped' "$output"
+    check 'list noctalia' '^noctalia +available +stopped' "$output"
+    teardown
+}
+
+test_running_detection() {
+    setup
+    all_ready
+    local output
+    mock_process 100 quickshell -n -p "$JETSHELL_OMARCHY_ROOT/shell"
+    output=$(run_switch status)
+    check 'stock omarchy running' '^Running: +omarchy$' "$output"
+
+    rm -rf "${JETSHELL_PROC_ROOT:?}"/*
+    mock_process 101 quickshell -n -p "$XDG_STATE_HOME/jetshell/omarchy-root/shell"
+    output=$(run_switch status)
+    check 'jetshell via overlay running' '^Running: +jetshell$' "$output"
+
+    rm -rf "${JETSHELL_PROC_ROOT:?}"/*
+    mock_process 102 quickshell -p "$JETSHELL_SHELL_DIR"
+    touch "$NOCTALIA_ACTIVE"
+    output=$(run_switch status)
+    check 'jetshell direct + noctalia' '^Running: +jetshell noctalia$' "$output"
+    check 'multiple warning' 'multiple shell backends' "$output"
+    teardown
+}
+
+test_overlay_omarchy_path_ignored() {
+    setup
+    all_ready
+    # Inside a jetshell session OMARCHY_PATH is the overlay, which must not be
+    # mistaken for the stock tree.
+    # The stock tree sits at the scripts/omarchy-shell.sh unpack location, which is checked
+    # after OMARCHY_PATH, so only the overlay skip keeps it from winning.
+    local stock=$HOME/.local/share/omarchy-shell/usr/share/omarchy
+    mkdir -p "$(dirname "$stock")"
+    mv "$JETSHELL_OMARCHY_ROOT" "$stock"
+    unset JETSHELL_OMARCHY_ROOT
+    export OMARCHY_PATH=$XDG_STATE_HOME/jetshell/omarchy-root
+    mkdir -p "$OMARCHY_PATH/bin" "$OMARCHY_PATH/shell"
+    cp "$stock/bin/omarchy-launch-shell" "$OMARCHY_PATH/bin/"
+    touch "$OMARCHY_PATH/shell/shell.qml"
+    local output
+    output=$(run_switch list)
+    check 'omarchy uses real tree' "^omarchy .*$stock/shell\$" "$output"
+    teardown
+}
+
+test_saved_selection() {
+    setup
+    all_ready
+    mkdir -p "$XDG_STATE_HOME/jetshell"
+    echo omarchy > "$XDG_STATE_HOME/jetshell/active"
+    local output
+    output=$(run_switch status)
+    check 'status shows selection' '^Selected: +omarchy$' "$output"
+    output=$(run_switch doctor)
+    check 'doctor shows selection' 'saved selection: omarchy' "$output"
+    teardown
+}
+
+test_usage_errors() {
+    setup
+    local status
+    run_switch >/dev/null 2>&1
+    status=$?
+    (( status == 2 )) || { echo "FAIL: no-arg exit $status, want 2"; ((failures += 1)); }
+    run_switch bogus >/dev/null 2>&1
+    status=$?
+    (( status == 2 )) || { echo "FAIL: unknown command exit $status, want 2"; ((failures += 1)); }
+    teardown
+}
+
+test_switch_noctalia_to_jetshell() {
+    setup
+    all_ready
+    touch "$NOCTALIA_ACTIVE"
+    local output status overlay=$XDG_STATE_HOME/jetshell/omarchy-root
+    output=$(run_switch switch jetshell 2>&1)
+    status=$?
+    check 'switched message' '^Switched to jetshell$' "$output"
+    (( status == 0 )) || { echo "FAIL: switch exit $status, want 0"; ((failures += 1)); }
+    [[ ! -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia still active'; ((failures += 1)); }
+    check 'state saved' '^jetshell$' "$(cat "$XDG_STATE_HOME/jetshell/active")"
+    [[ $(readlink "$overlay/shell") == "$JETSHELL_SHELL_DIR" ]] ||
+        { echo 'FAIL: overlay shell/ not pointing at repo shell'; ((failures += 1)); }
+    [[ $(readlink "$overlay/default") == "$JETSHELL_OMARCHY_ROOT/default" ]] ||
+        { echo 'FAIL: overlay missing default/ link'; ((failures += 1)); }
+    output=$(run_switch status)
+    check 'jetshell running after switch' '^Running: +jetshell$' "$output"
+    teardown
+}
+
+test_switch_stops_supervisor() {
+    setup
+    all_ready
+    PATH=$MOCK_BIN OMARCHY_PATH=$JETSHELL_OMARCHY_ROOT "$JETSHELL_OMARCHY_ROOT/bin/omarchy-launch-shell"
+    local output
+    output=$(run_switch switch jetshell 2>&1)
+    check 'omarchy to jetshell' '^Switched to jetshell$' "$output"
+    # The supervisor (300), not the shell (301), gets the signal.
+    check 'supervisor killed' '^300$' "$(cat "$TEST_DIR/killed")"
+    output=$(run_switch status)
+    check 'only jetshell left' '^Running: +jetshell$' "$output"
+    teardown
+}
+
+test_switch_rolls_back() {
+    setup
+    all_ready
+    touch "$NOCTALIA_ACTIVE"
+    local output status
+    output=$(JETSHELL_TEST_FAIL_START=1 run_switch switch jetshell 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: failed switch exit $status, want 1"; ((failures += 1)); }
+    check 'rollback reported' 'did not become ready; rolling back' "$output"
+    check 'noctalia restored' '^Restored noctalia$' "$output"
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia not restarted'; ((failures += 1)); }
+    [[ ! -f $XDG_STATE_HOME/jetshell/active ]] ||
+        { echo 'FAIL: selection saved after failed switch'; ((failures += 1)); }
+    teardown
+}
+
+test_switch_refuses_when_locked() {
+    setup
+    all_ready
+    PATH=$MOCK_BIN OMARCHY_PATH=$JETSHELL_OMARCHY_ROOT "$JETSHELL_OMARCHY_ROOT/bin/omarchy-launch-shell"
+    touch "$TEST_DIR/locked"
+    local output status
+    output=$(run_switch switch noctalia 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: locked switch exit $status, want 1"; ((failures += 1)); }
+    check 'lock refusal' 'omarchy is locked' "$output"
+    [[ ! -f $TEST_DIR/killed ]] || { echo 'FAIL: killed a locked shell'; ((failures += 1)); }
+    [[ ! -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: started noctalia while locked'; ((failures += 1)); }
+    teardown
+}
+
+test_switch_already_running() {
+    setup
+    all_ready
+    touch "$NOCTALIA_ACTIVE"
+    local output
+    output=$(run_switch switch noctalia 2>&1)
+    check 'already running' '^noctalia is already running$' "$output"
+    check 'state saved' '^noctalia$' "$(cat "$XDG_STATE_HOME/jetshell/active")"
+    teardown
+}
+
+test_switch_unavailable_target() {
+    setup
+    mock_noctalia
+    mock_jetshell_shell
+    touch "$NOCTALIA_ACTIVE"
+    local output status
+    output=$(run_switch switch jetshell 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: unavailable exit $status, want 1"; ((failures += 1)); }
+    check 'unavailable reason' 'jetshell is unavailable: quickshell command not found' "$output"
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: stopped noctalia for unavailable target'; ((failures += 1)); }
+    output=$(run_switch switch bogus 2>&1)
+    check 'unknown backend' 'unknown backend: bogus' "$output"
+    teardown
+}
+
+test_nothing_installed
+test_missing_omarchy_tree
+test_all_ready
+test_running_detection
+test_overlay_omarchy_path_ignored
+test_saved_selection
+test_usage_errors
+test_switch_noctalia_to_jetshell
+test_switch_stops_supervisor
+test_switch_rolls_back
+test_switch_refuses_when_locked
+test_switch_already_running
+test_switch_unavailable_target
+
+if (( failures )); then
+    printf '%d check(s) failed\n' "$failures"
+    exit 1
+fi
+echo 'All tests passed'
