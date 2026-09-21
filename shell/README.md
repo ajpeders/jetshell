@@ -1,6 +1,11 @@
 # shell
 
-The jetshell shell — a hand-written Quickshell config (bar, notifications,
-panels, launcher).
+The jetshell shell — a Quickshell config (bar, notifications, panels,
+launcher), forked from Omarchy's shell and evolving into its own thing.
 
-Work in progress — nothing here yet.
+- Entry point: `shell.qml`
+- Fork origin and license: `UPSTREAM.md`, `LICENSE`
+- Upstream architecture and plugin notes: `OMARCHY.md`
+
+Work in progress — currently the unmodified Omarchy starting point, which still
+calls Omarchy's `omarchy-*` helper programs.
