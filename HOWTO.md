@@ -23,6 +23,14 @@ from a locked Omarchy/jetshell session, and it restores the previous shell if
 the new one does not answer within 15 s. If a switch goes wrong, `switch
 noctalia` is the known-good way back.
 
+## Start the saved shell at login
+
+Hyprland's `~/.config/hypr/config/autostart.lua` runs
+`~/projects/jetshell/switcher/jetshell-switch start` when the switcher exists,
+appending to `~/.local/state/jetshell/start.log`. It starts whichever shell
+was last chosen with `switch`, or Noctalia. Check that log first if the bar is
+missing after login.
+
 ## Reload jetshell after editing `shell/`
 
 The shell does not hot-reload, so restart it:

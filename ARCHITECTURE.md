@@ -93,6 +93,13 @@ upstream Quickshell on one machine.
 backend fails to return it starts Noctalia instead and leaves the saved
 selection unchanged.
 
+`start` (login, from `hypr/config/autostart.lua`) runs `switch` to the saved
+backend without changing the selection on failure, falls back to Noctalia,
+and starts `polkit-gnome` only when Noctalia ends up running — jetshell and
+Omarchy register their own polkit agent. `noctalia-shell.service` is enabled
+for `graphical-session.target`, but that target is not reached in this Hyprland
+session, so Noctalia does not race the login start.
+
 Timeouts: `JETSHELL_START_TIMEOUT` (15 s), `JETSHELL_STOP_TIMEOUT` (10 s).
 
 ## agent-usage plugin

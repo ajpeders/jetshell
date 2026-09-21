@@ -21,6 +21,7 @@ setup() {
     export TEST_DIR NOCTALIA_ACTIVE
     export JETSHELL_KILL=$TEST_DIR/bin/kill
     export JETSHELL_START_TIMEOUT=2 JETSHELL_STOP_TIMEOUT=2
+    export JETSHELL_POLKIT_AGENT=$TEST_DIR/bin/polkit-agent
     unset JETSHELL_TEST_FAIL_START
     mkdir -p "$HOME" "$JETSHELL_PROC_ROOT" "$MOCK_BIN"
     # The switcher sees only mocks plus the tools it needs, so real
@@ -42,6 +43,14 @@ done
 exit 0
 EOF
     chmod +x "$MOCK_BIN/kill"
+    cat > "$MOCK_BIN/polkit-agent" <<'EOF'
+#!/bin/bash
+PATH=/usr/bin:/bin
+echo started >> "$TEST_DIR/polkit-starts"
+mkdir -p "$JETSHELL_PROC_ROOT/500"
+printf '%s\0' "$JETSHELL_POLKIT_AGENT" > "$JETSHELL_PROC_ROOT/500/cmdline"
+EOF
+    chmod +x "$MOCK_BIN/polkit-agent"
 }
 
 run_switch() {
@@ -391,6 +400,95 @@ test_restart_refuses_when_locked() {
     teardown
 }
 
+save_choice() {
+    mkdir -p "$XDG_STATE_HOME/jetshell"
+    echo "$1" > "$XDG_STATE_HOME/jetshell/active"
+}
+
+# The agent is launched with setsid -f, so give it a moment to register.
+polkit_starts() {
+    local i
+    for ((i = 0; i < 20; i++)); do
+        [[ -f $TEST_DIR/polkit-starts ]] && break
+        sleep 0.05
+    done
+    [[ -f $TEST_DIR/polkit-starts ]] && wc -l < "$TEST_DIR/polkit-starts" || echo 0
+}
+
+test_start_saved_jetshell() {
+    setup
+    all_ready
+    save_choice jetshell
+    local output status
+    output=$(run_switch start 2>&1)
+    status=$?
+    (( status == 0 )) || { echo "FAIL: start exit $status, want 0"; ((failures += 1)); }
+    check 'jetshell started' '^Running: +jetshell$' "$(run_switch status)"
+    [[ $(polkit_starts) == 0 ]] || { echo 'FAIL: polkit-gnome started alongside jetshell'; ((failures += 1)); }
+    teardown
+}
+
+test_start_defaults_to_noctalia() {
+    setup
+    all_ready
+    local output status
+    output=$(run_switch start 2>&1)
+    status=$?
+    (( status == 0 )) || { echo "FAIL: default start exit $status, want 0"; ((failures += 1)); }
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia not started by default'; ((failures += 1)); }
+    [[ $(polkit_starts) == 1 ]] || { echo 'FAIL: polkit-gnome not started with noctalia'; ((failures += 1)); }
+    teardown
+}
+
+test_start_replaces_autostarted_noctalia() {
+    setup
+    all_ready
+    save_choice jetshell
+    touch "$NOCTALIA_ACTIVE"    # e.g. started by graphical-session.target
+    run_switch start >/dev/null 2>&1
+    check 'only jetshell running' '^Running: +jetshell$' "$(run_switch status)"
+    teardown
+}
+
+test_start_falls_back_to_noctalia() {
+    setup
+    all_ready
+    save_choice jetshell
+    local output status
+    output=$(JETSHELL_TEST_FAIL_START=1 run_switch start 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: failed start exit $status, want 1"; ((failures += 1)); }
+    check 'fallback reported' 'fell back to noctalia' "$output"
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia not started as fallback'; ((failures += 1)); }
+    [[ $(polkit_starts) == 1 ]] || { echo 'FAIL: polkit-gnome not started with fallback'; ((failures += 1)); }
+    check 'selection kept' '^jetshell$' "$(cat "$XDG_STATE_HOME/jetshell/active")"
+    teardown
+}
+
+test_start_bad_selection() {
+    setup
+    all_ready
+    save_choice bogus
+    local output status
+    output=$(run_switch start 2>&1)
+    status=$?
+    (( status == 0 )) || { echo "FAIL: bad-selection start exit $status, want 0"; ((failures += 1)); }
+    check 'bad selection reported' 'unknown saved selection bogus' "$output"
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia not started for bad selection'; ((failures += 1)); }
+    teardown
+}
+
+test_start_polkit_once() {
+    setup
+    all_ready
+    run_switch start >/dev/null 2>&1
+    polkit_starts >/dev/null
+    run_switch start >/dev/null 2>&1
+    sleep 0.3
+    [[ $(polkit_starts) == 1 ]] || { echo "FAIL: polkit-gnome started $(polkit_starts) times, want 1"; ((failures += 1)); }
+    teardown
+}
+
 test_nothing_installed
 test_missing_omarchy_tree
 test_all_ready
@@ -408,6 +506,12 @@ test_restart_jetshell
 test_restart_falls_back_to_noctalia
 test_restart_nothing_running
 test_restart_refuses_when_locked
+test_start_saved_jetshell
+test_start_defaults_to_noctalia
+test_start_replaces_autostarted_noctalia
+test_start_falls_back_to_noctalia
+test_start_bad_selection
+test_start_polkit_once
 
 if (( failures )); then
     printf '%d check(s) failed\n' "$failures"

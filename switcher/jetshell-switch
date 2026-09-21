@@ -17,6 +17,8 @@ readonly NOCTALIA_SERVICE=${JETSHELL_NOCTALIA_SERVICE:-noctalia-shell.service}
 readonly START_TIMEOUT=${JETSHELL_START_TIMEOUT:-15}
 readonly STOP_TIMEOUT=${JETSHELL_STOP_TIMEOUT:-10}
 readonly KILL=${JETSHELL_KILL:-kill}
+# jetshell and Omarchy run their own polkit agent; Noctalia needs this one.
+readonly POLKIT_AGENT=${JETSHELL_POLKIT_AGENT:-/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1}
 readonly BACKENDS=(jetshell omarchy noctalia)
 
 usage() {
@@ -32,6 +34,7 @@ Commands:
   doctor            Diagnose backend requirements
   switch <backend>  Stop the running shell and start <backend>
   restart           Restart the running shell (e.g. to load code changes)
+  start             Start the saved shell at login, falling back to Noctalia
   help              Show this help
 
 Backends: ${BACKENDS[*]}
@@ -399,6 +402,53 @@ command_restart() {
     return 1
 }
 
+# Succeeds if a process's argv[0] is exactly $1.
+program_running() {
+    local cmdline argv0
+    for cmdline in "$PROC_ROOT"/[0-9]*/cmdline; do
+        [[ -r $cmdline ]] || continue
+        IFS= read -r -d '' argv0 < "$cmdline" 2>/dev/null || true
+        [[ $argv0 == "$1" ]] && return 0
+    done
+    return 1
+}
+
+start_polkit_agent() {
+    [[ -x $POLKIT_AGENT ]] || return 0
+    program_running "$POLKIT_AGENT" && return 0
+    setsid -f "$POLKIT_AGENT" </dev/null >/dev/null 2>&1
+}
+
+# Login entry point (hypr/config/autostart.lua). Brings up the saved shell,
+# or Noctalia when there is none, it is unknown, or it fails to start. A
+# failed start leaves the saved selection alone, so a broken jetshell is
+# retried at the next login rather than silently forgotten.
+command_start() {
+    local target status=0
+
+    printf '%(%F %T)T start\n' -1
+    target=$(saved_selection) || target=noctalia
+    if [[ " ${BACKENDS[*]} " != *" $target "* ]]; then
+        printf '%s: unknown saved selection %s; using noctalia\n' "$PROGRAM" "$target" >&2
+        target=noctalia
+    fi
+
+    if ! command_switch "$target"; then
+        status=1
+        if [[ $target != noctalia ]]; then
+            if ! backend_running noctalia; then
+                start_backend noctalia
+                wait_for "$START_TIMEOUT" backend_ready noctalia ||
+                    printf '%s: could not start noctalia either\n' "$PROGRAM" >&2
+            fi
+            backend_running noctalia && printf 'fell back to noctalia\n' >&2
+        fi
+    fi
+
+    backend_running noctalia && start_polkit_agent
+    return "$status"
+}
+
 saved_selection() {
     local selection
 
@@ -479,6 +529,7 @@ main() {
         doctor) command_doctor ;;
         switch) command_switch "${2:-}" ;;
         restart) command_restart ;;
+        start) command_start ;;
         help|--help|-h) usage ;;
         '')
             usage >&2

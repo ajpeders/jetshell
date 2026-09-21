@@ -12,6 +12,7 @@
 ./jetshell-switch doctor    # why a backend is unavailable
 ./jetshell-switch switch jetshell|omarchy|noctalia
 ./jetshell-switch restart   # reload the running shell after code changes
+./jetshell-switch start     # login: bring up the saved shell
 ./tests/test-jetshell-switch
 ```
 
@@ -23,3 +24,8 @@ if it does not. The selection is saved only after a successful switch.
 (the shell does not hot-reload). If jetshell or Omarchy fails to come back,
 Noctalia is started so the session keeps a bar; the saved selection is left
 unchanged.
+
+`start` is the login entry point, called from Hyprland's
+`hypr/config/autostart.lua`. It starts the saved shell (Noctalia if none is
+saved or the saved one is unknown), falls back to Noctalia if that fails, and
+starts the `polkit-gnome` agent only when Noctalia is the running shell.

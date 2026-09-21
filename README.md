@@ -18,7 +18,7 @@ jetshell/
 
 `jetshell-switch` moves the desktop between jetshell, stock Omarchy, and
 Noctalia so the fork can be tested against the others
-(`list`, `status`, `doctor`, `switch <backend>`, `restart`).
+(`list`, `status`, `doctor`, `switch <backend>`, `restart`, and `start` at login).
 
 ### shell/
 
