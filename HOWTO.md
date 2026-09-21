@@ -34,9 +34,10 @@ a non-Omarchy Arch box, `scripts/omarchy-shell.sh` unpacks them under `$HOME`:
 ```
 
 The install uses `sudo pacman` for Quickshell and downloads the Omarchy
-packages. It also adds a Hyprland `exec-once` for the stock shell; remove that
-if the switcher should decide which shell starts. Noctalia 5 can stay
-installed alongside.
+packages. It also writes `~/.config/hypr/omarchy/omarchy-shell.lua`, which
+autostarts the stock shell, and requires it from `omarchy/autostart.lua`;
+remove that require if the switcher should decide which shell starts.
+Noctalia 5 can stay installed alongside.
 
 ## Run the switcher tests
 
