@@ -89,6 +89,10 @@ upstream Quickshell on one machine.
 6. On success, write `$XDG_STATE_HOME/jetshell/active` atomically. On
    failure, stop the target and restart the previous backends.
 
+`restart` runs steps 2–5 on the single running backend; if a Quickshell
+backend fails to return it starts Noctalia instead and leaves the saved
+selection unchanged.
+
 Timeouts: `JETSHELL_START_TIMEOUT` (15 s), `JETSHELL_STOP_TIMEOUT` (10 s).
 
 ## agent-usage plugin

@@ -31,6 +31,7 @@ Commands:
   status            Show the saved selection and running backends
   doctor            Diagnose backend requirements
   switch <backend>  Stop the running shell and start <backend>
+  restart           Restart the running shell (e.g. to load code changes)
   help              Show this help
 
 Backends: ${BACKENDS[*]}
@@ -346,6 +347,58 @@ command_switch() {
     return 1
 }
 
+# Stops and starts the running backend so it reloads its code. If it does not
+# come back, Noctalia is started so the session is never left without a shell.
+command_restart() {
+    local backend current=
+    local -a running=()
+
+    for backend in "${BACKENDS[@]}"; do
+        backend_running "$backend" && running+=("$backend")
+    done
+    if (( ${#running[@]} == 0 )); then
+        printf '%s: no shell is running; use switch <backend>\n' "$PROGRAM" >&2
+        return 1
+    fi
+    if (( ${#running[@]} > 1 )); then
+        printf '%s: several shells are running (%s); use switch <backend>\n' "$PROGRAM" "${running[*]}" >&2
+        return 1
+    fi
+    current=${running[0]}
+
+    if backend_locked "$current"; then
+        printf '%s: %s is locked; unlock before restarting\n' "$PROGRAM" "$current" >&2
+        return 1
+    fi
+    if [[ $current == jetshell ]] && ! build_overlay; then
+        printf '%s: could not build %s\n' "$PROGRAM" "$OVERLAY_ROOT" >&2
+        return 1
+    fi
+
+    stop_backend "$current"
+    if ! wait_for "$STOP_TIMEOUT" backend_stopped "$current"; then
+        printf '%s: %s did not stop\n' "$PROGRAM" "$current" >&2
+        return 1
+    fi
+    start_backend "$current"
+    if wait_for "$START_TIMEOUT" backend_ready "$current"; then
+        printf 'Restarted %s\n' "$current"
+        return 0
+    fi
+
+    printf '%s: %s did not come back\n' "$PROGRAM" "$current" >&2
+    [[ $current == noctalia ]] && return 1
+    stop_backend "$current"
+    wait_for "$STOP_TIMEOUT" backend_stopped "$current" || true
+    start_backend noctalia
+    if wait_for "$START_TIMEOUT" backend_ready noctalia; then
+        printf 'fell back to noctalia\n' >&2
+    else
+        printf '%s: could not start noctalia either\n' "$PROGRAM" >&2
+    fi
+    return 1
+}
+
 saved_selection() {
     local selection
 
@@ -425,6 +478,7 @@ main() {
         status) command_status ;;
         doctor) command_doctor ;;
         switch) command_switch "${2:-}" ;;
+        restart) command_restart ;;
         help|--help|-h) usage ;;
         '')
             usage >&2

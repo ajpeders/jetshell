@@ -23,6 +23,18 @@ from a locked Omarchy/jetshell session, and it restores the previous shell if
 the new one does not answer within 15 s. If a switch goes wrong, `switch
 noctalia` is the known-good way back.
 
+## Reload jetshell after editing `shell/`
+
+The shell does not hot-reload, so restart it:
+
+```sh
+./switcher/jetshell-switch restart
+```
+
+If the edited shell fails to start (e.g. a QML error), the switcher falls
+back to Noctalia. Check `journalctl --user -t omarchy-shell --since -2min`
+for the error, fix it, then `switch jetshell` again.
+
 ## Set up Quickshell and the Omarchy tree
 
 jetshell and stock Omarchy need upstream Quickshell plus Omarchy's helpers. On

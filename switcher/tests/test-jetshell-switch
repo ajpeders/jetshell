@@ -335,6 +335,62 @@ test_switch_unavailable_target() {
     teardown
 }
 
+test_restart_jetshell() {
+    setup
+    all_ready
+    run_switch switch jetshell >/dev/null 2>&1
+    rm -f "$TEST_DIR/killed"
+    local output status
+    output=$(run_switch restart 2>&1)
+    status=$?
+    (( status == 0 )) || { echo "FAIL: restart exit $status, want 0"; ((failures += 1)); }
+    check 'restart message' '^Restarted jetshell$' "$output"
+    check 'supervisor stopped' '^200$' "$(cat "$TEST_DIR/killed" 2>/dev/null)"
+    output=$(run_switch status)
+    check 'jetshell back up' '^Running: +jetshell$' "$output"
+    teardown
+}
+
+test_restart_falls_back_to_noctalia() {
+    setup
+    all_ready
+    run_switch switch jetshell >/dev/null 2>&1
+    local output status
+    output=$(JETSHELL_TEST_FAIL_START=1 run_switch restart 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: failed restart exit $status, want 1"; ((failures += 1)); }
+    check 'fallback reported' 'fell back to noctalia' "$output"
+    [[ -f $NOCTALIA_ACTIVE ]] || { echo 'FAIL: noctalia not started as fallback'; ((failures += 1)); }
+    check 'selection kept' '^jetshell$' "$(cat "$XDG_STATE_HOME/jetshell/active")"
+    teardown
+}
+
+test_restart_nothing_running() {
+    setup
+    all_ready
+    local output status
+    output=$(run_switch restart 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: idle restart exit $status, want 1"; ((failures += 1)); }
+    check 'nothing running' 'no shell is running' "$output"
+    teardown
+}
+
+test_restart_refuses_when_locked() {
+    setup
+    all_ready
+    run_switch switch jetshell >/dev/null 2>&1
+    rm -f "$TEST_DIR/killed"
+    touch "$TEST_DIR/locked"
+    local output status
+    output=$(run_switch restart 2>&1)
+    status=$?
+    (( status == 1 )) || { echo "FAIL: locked restart exit $status, want 1"; ((failures += 1)); }
+    check 'lock refusal' 'jetshell is locked' "$output"
+    [[ ! -f $TEST_DIR/killed ]] || { echo 'FAIL: killed a locked shell'; ((failures += 1)); }
+    teardown
+}
+
 test_nothing_installed
 test_missing_omarchy_tree
 test_all_ready
@@ -348,6 +404,10 @@ test_switch_rolls_back
 test_switch_refuses_when_locked
 test_switch_already_running
 test_switch_unavailable_target
+test_restart_jetshell
+test_restart_falls_back_to_noctalia
+test_restart_nothing_running
+test_restart_refuses_when_locked
 
 if (( failures )); then
     printf '%d check(s) failed\n' "$failures"
