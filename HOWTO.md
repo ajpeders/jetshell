@@ -68,6 +68,19 @@ Noctalia 5 can stay installed alongside.
 Everything is mocked (PATH, `/proc`, the Omarchy tree, systemd); the tests
 never touch the running desktop.
 
+## Set up the lock screen
+
+jetshell's lock screen checks your password through the PAM service
+`/etc/pam.d/jetshell-lock`; until that file exists the lock refuses to engage.
+Install it once per machine (uses `sudo`):
+
+```sh
+./scripts/install-lock-pam
+```
+
+The file lives in `system/pam.d/jetshell-lock`: a normal password check, and
+10 failed attempts lock the account for 2 minutes.
+
 ## Install or refresh the agent-usage plugin
 
 ```sh

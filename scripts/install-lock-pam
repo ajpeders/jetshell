@@ -1,0 +1,8 @@
+#!/bin/bash
+# Installs the PAM service the jetshell lock screen authenticates against.
+# The lock refuses to engage until /etc/pam.d/jetshell-lock exists.
+set -euo pipefail
+
+source=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/system/pam.d/jetshell-lock
+sudo install -m 644 -o root -g root "$source" /etc/pam.d/jetshell-lock
+echo "Installed /etc/pam.d/jetshell-lock"

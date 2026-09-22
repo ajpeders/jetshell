@@ -359,7 +359,7 @@ Item {
 
   PamContext {
     id: passwordPam
-    config: "omarchy-lock-password"
+    config: "jetshell-lock"
     user: root.userName
 
     onResponseRequiredChanged: root.respondToPasswordPrompt()
@@ -552,7 +552,7 @@ Item {
   }
 
   FileView {
-    path: "/etc/pam.d/omarchy-lock-password"
+    path: "/etc/pam.d/jetshell-lock"
     watchChanges: true
     printErrors: false
     onLoaded: root.passwordPamConfigured = true

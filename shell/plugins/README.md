@@ -79,7 +79,7 @@ between summons within a single shell session.
 ## Lock screen
 
 Session-lock surface using Quickshell's native `WlSessionLock` and two
-separate PAM services: `omarchy-lock-password` for password auth and,
+separate PAM services: `jetshell-lock` for password auth and,
 only when fingerprints are enrolled, `omarchy-lock-fingerprint` for
 fingerprint auth. It mirrors the previous lock screen field dimensions,
 colors, blurred wallpaper, placeholder, and Hyprland-driven corners.

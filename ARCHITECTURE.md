@@ -36,6 +36,14 @@ menus load on demand. Full plugin contract: `shell/OMARCHY.md` and
 `$OMARCHY_PATH/config/omarchy/shell.json`, then to a built-in default.
 User plugins are discovered under `~/.config/omarchy/plugins/<id>/`.
 
+## Lock screen
+
+`shell/plugins/lock` draws the lock with Quickshell's `WlSessionLock` and
+authenticates through the PAM service `jetshell-lock`, installed from
+`system/pam.d/jetshell-lock` by `scripts/install-lock-pam`. It does not use
+Omarchy's `omarchy-lock-password` service. Fingerprint auth still looks for
+Omarchy's `omarchy-lock-fingerprint`.
+
 ## Omarchy runtime dependency
 
 The shell is not yet standalone. It relies on:
